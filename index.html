@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Système solaire — gravitation newtonienne</title>
+<style>
+  :root {
+    --bg: #05060c;
+    --panel: rgba(18, 20, 32, 0.82);
+    --border: rgba(255, 255, 255, 0.12);
+    --txt: #e8ebf5;
+    --dim: #99a0b8;
+    --accent: #ffd166;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--txt);
+    font: 13px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  #cv { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  #cv.dragging { cursor: grabbing; }
+
+  .panel {
+    position: fixed; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(8px);
+  }
+  #ui { top: 12px; left: 12px; width: 268px; }
+  #hud { top: 12px; right: 12px; min-width: 300px; }
+  h1 { font-size: 13px; margin: 0 0 8px; letter-spacing: .04em; color: var(--accent); font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { flex: 0 0 92px; color: var(--dim); font-size: 11px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); min-width: 0; }
+  .val { flex: 0 0 68px; text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; }
+  button {
+    font: inherit; font-size: 11px; color: var(--txt); background: rgba(255,255,255,.07);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; cursor: pointer;
+  }
+  button:hover { background: rgba(255,255,255,.14); }
+  button.on { background: rgba(255,209,102,.18); border-color: rgba(255,209,102,.5); color: var(--accent); }
+  .btns { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 11px; }
+  th, td { text-align: right; padding: 1px 4px; font-variant-numeric: tabular-nums; }
+  th { color: var(--dim); font-weight: 400; border-bottom: 1px solid var(--border); }
+  td:first-child, th:first-child { text-align: left; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  .note { color: var(--dim); font-size: 10px; margin-top: 8px; line-height: 1.5; }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="ui" class="panel">
+  <h1>Gravitation newtonienne</h1>
+  <div class="row">
+    <label>Vitesse</label>
+    <input type="range" id="speed" min="1" max="400" value="24">
+    <span class="val" id="speedVal"></span>
+  </div>
+  <div class="row">
+    <label>Pas dt</label>
+    <input type="range" id="dt" min="60" max="7200" step="60" value="900">
+    <span class="val" id="dtVal"></span>
+  </div>
+  <div class="row">
+    <label>Zoom</label>
+    <input type="range" id="zoom" min="-100" max="100" value="0">
+    <span class="val" id="zoomVal"></span>
+  </div>
+  <div class="btns">
+    <button id="pause">⏸ Pause</button>
+    <button id="reset">↺ Reset</button>
+    <button id="trails" class="on">Traces</button>
+    <button id="vectors">Vecteurs</button>
+  </div>
+  <div class="btns">
+    <button data-view="inner">Système interne</button>
+    <button data-view="all" class="on">Complet</button>
+  </div>
+  <hr>
+  <div class="note">
+    Aucune orbite pré-calculée : à chaque pas, <code>F = G·m₁·m₂/r²</code> est
+    sommée sur les 36 paires de corps, puis intégrée (leapfrog / Verlet des vitesses).
+    Les planètes se perturbent mutuellement.<br>
+    Molette = zoom · glisser = déplacer · clic sur un corps = centrer.
+  </div>
+</div>
+
+<div id="hud" class="panel">
+  <table>
+    <thead><tr><th>Corps</th><th>r (UA)</th><th>v (km/s)</th><th>T (ans)</th></tr></thead>
+    <tbody id="tb"></tbody>
+  </table>
+  <hr>
+  <div class="row" style="margin:0"><label>Temps écoulé</label><span id="tElapsed" style="flex:1">—</span></div>
+  <div class="row" style="margin:0"><label>Énergie tot.</label><span id="energy" style="flex:1">—</span></div>
+  <div class="row" style="margin:0"><label>Dérive E</label><span id="drift" style="flex:1">—</span></div>
+</div>
+
+<script>
+"use strict";
+
+/* ─────────────────────────── Constantes physiques (SI) ─────────────────────────── */
+const G   = 6.67430e-11;          // m³·kg⁻¹·s⁻²
+const AU  = 1.495978707e11;       // m
+const DAY = 86400;                // s
+const YEAR = 365.25 * DAY;
+
+/* Données réelles : masse (kg), demi-grand axe (m), excentricité, rayon (m).
+   Chaque corps démarre au périhélie, avec la vitesse donnée par vis-viva :
+   v = sqrt( G·M_soleil · (1+e) / (a·(1-e)) )  — le reste est laissé à la gravité. */
+const DATA = [
+  { name: "Soleil",  m: 1.98892e30, a: 0,          e: 0,      R: 6.9634e8, color: "#ffd15c", ang: 0 },
+  { name: "Mercure", m: 3.3011e23,  a: 5.7909e10,  e: 0.2056, R: 2.4397e6, color: "#b7b0a8", ang: 4.40 },
+  { name: "Vénus",   m: 4.8675e24,  a: 1.08210e11, e: 0.0068, R: 6.0518e6, color: "#e8c37a", ang: 1.34 },
+  { name: "Terre",   m: 5.97237e24, a: 1.49598e11, e: 0.0167, R: 6.3710e6, color: "#5b9bd5", ang: 0.00 },
+  { name: "Mars",    m: 6.4171e23,  a: 2.27956e11, e: 0.0934, R: 3.3895e6, color: "#d2603a", ang: 5.00 },
+  { name: "Jupiter", m: 1.89819e27, a: 7.78479e11, e: 0.0489, R: 6.9911e7, color: "#d8a06a", ang: 0.25 },
+  { name: "Saturne", m: 5.68340e26, a: 1.43353e12, e: 0.0565, R: 5.8232e7, color: "#e3d5a3", ang: 2.10 },
+  { name: "Uranus",  m: 8.68100e25, a: 2.87246e12, e: 0.0457, R: 2.5362e7, color: "#8fd3dd", ang: 3.40 },
+  { name: "Neptune", m: 1.02413e26, a: 4.49506e12, e: 0.0113, R: 2.4622e7, color: "#4f70d8", ang: 5.60 },
+];
+
+/* ─────────────────────────── État de la simulation ─────────────────────────── */
+let bodies = [];      // { name, m, x, y, vx, vy, ax, ay, R, color, trail:[] }
+let simTime = 0;      // secondes écoulées
+let E0 = null;        // énergie initiale (référence de dérive)
+
+function initBodies() {
+  const Msun = DATA[0].m;
+  bodies = DATA.map(d => {
+    const rp = d.a * (1 - d.e);                                  // distance au périhélie
+    const v  = d.a > 0 ? Math.sqrt(G * Msun * (1 + d.e) / rp) : 0; // vitesse au périhélie
+    return {
+      name: d.name, m: d.m, R: d.R, color: d.color,
+      x: rp * Math.cos(d.ang),  y: rp * Math.sin(d.ang),
+      vx: -v * Math.sin(d.ang), vy: v * Math.cos(d.ang),         // perpendiculaire au rayon
+      ax: 0, ay: 0,
+      trail: [], lastR: rp, tCross: null, period: null,
+    };
+  });
+
+  // On annule la quantité de mouvement totale : le barycentre reste fixe à l'écran.
+  let px = 0, py = 0, M = 0;
+  for (const b of bodies) { px += b.m * b.vx; py += b.m * b.vy; M += b.m; }
+  for (const b of bodies) { b.vx -= px / M; b.vy -= py / M; }
+
+  computeAccelerations();
+  simTime = 0;
+  E0 = totalEnergy();
+}
+
+/* Loi de la gravitation universelle : accélération de chaque corps = Σ G·mⱼ·r̂/r² */
+function computeAccelerations() {
+  for (const b of bodies) { b.ax = 0; b.ay = 0; }
+  for (let i = 0; i < bodies.length; i++) {
+    const bi = bodies[i];
+    for (let j = i + 1; j < bodies.length; j++) {
+      const bj = bodies[j];
+      const dx = bj.x - bi.x, dy = bj.y - bi.y;
+      const r2 = dx * dx + dy * dy;
+      const r  = Math.sqrt(r2);
+      const inv = 1 / (r2 * r);            // 1/r³ → multiplié par (dx,dy) donne r̂/r²
+      const fi = G * bj.m * inv;           // ‖a_i‖ / r  (vers j)
+      const fj = G * bi.m * inv;           // ‖a_j‖ / r  (vers i)
+      bi.ax += fi * dx;  bi.ay += fi * dy;
+      bj.ax -= fj * dx;  bj.ay -= fj * dy; // 3ᵉ loi de Newton
+    }
+  }
+}
+
+/* Intégrateur leapfrog (Verlet des vitesses) : symplectique, conserve bien l'énergie. */
+function step(dt) {
+  for (const b of bodies) {                 // demi-pas de vitesse + pas de position
+    b.vx += 0.5 * b.ax * dt;  b.vy += 0.5 * b.ay * dt;
+    b.x  += b.vx * dt;        b.y  += b.vy * dt;
+  }
+  computeAccelerations();                   // nouvelles forces
+  for (const b of bodies) {                 // second demi-pas de vitesse
+    b.vx += 0.5 * b.ax * dt;  b.vy += 0.5 * b.ay * dt;
+  }
+  simTime += dt;
+  detectPeriods();
+}
+
+/* Mesure empirique de la période : passage au périhélie (r minimal local). */
+function detectPeriods() {
+  for (let i = 1; i < bodies.length; i++) {
+    const b = bodies[i], s = bodies[0];
+    const r = Math.hypot(b.x - s.x, b.y - s.y);
+    if (b.prevR !== undefined && b.prev2R !== undefined &&
+        b.prevR <= b.prev2R && b.prevR <= r) {          // minimum local
+      if (b.tCross !== null) b.period = simTime - b.tCross;
+      b.tCross = simTime;
+    }
+    b.prev2R = b.prevR; b.prevR = r;
+  }
+}
+
+function totalEnergy() {
+  let K = 0, U = 0;
+  for (let i = 0; i < bodies.length; i++) {
+    const bi = bodies[i];
+    K += 0.5 * bi.m * (bi.vx * bi.vx + bi.vy * bi.vy);
+    for (let j = i + 1; j < bodies.length; j++) {
+      const bj = bodies[j];
+      U -= G * bi.m * bj.m / Math.hypot(bj.x - bi.x, bj.y - bi.y);
+    }
+  }
+  return K + U;
+}
+
+/* ─────────────────────────── Rendu ─────────────────────────── */
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+let W = 0, H = 0, dpr = 1;
+
+const view = { scale: 0, cx: 0, cy: 0, follow: 0 };   // scale = pixels par mètre
+function setView(kind) {
+  const span = kind === "inner" ? 1.8 * AU : 32 * AU; // demi-largeur visible
+  view.scale = Math.min(W, H) / 2 / span;
+  view.cx = 0; view.cy = 0; view.follow = 0;
+  baseScale = view.scale;
+  zoomEl.value = 0; syncLabels();
+}
+let baseScale = 1;
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+const toX = wx => (wx - view.cx) * view.scale + W / 2;
+const toY = wy => (wy - view.cy) * view.scale + H / 2;
+
+const stars = [];
+for (let i = 0; i < 400; i++) stars.push({ x: Math.random(), y: Math.random(), a: 0.2 + Math.random() * 0.6 });
+
+function draw() {
+  ctx.fillStyle = "#05060c";
+  ctx.fillRect(0, 0, W, H);
+
+  for (const s of stars) {
+    ctx.globalAlpha = s.a * 0.7;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(s.x * W, s.y * H, 1, 1);
+  }
+  ctx.globalAlpha = 1;
+
+  if (view.follow > 0) { view.cx = bodies[view.follow].x; view.cy = bodies[view.follow].y; }
+
+  // Traces (positions successivement réellement calculées, pas des ellipses théoriques)
+  if (showTrails) {
+    for (const b of bodies) {
+      if (b.trail.length < 2) continue;
+      ctx.strokeStyle = b.color; ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i < b.trail.length; i++) {
+        const p = b.trail[i], X = toX(p[0]), Y = toY(p[1]);
+        i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+      }
+      ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  for (let i = 0; i < bodies.length; i++) {
+    const b = bodies[i];
+    const X = toX(b.x), Y = toY(b.y);
+    if (X < -80 || X > W + 80 || Y < -80 || Y > H + 80) continue;
+
+    // rayon à l'échelle, mais avec un minimum lisible
+    let rad = Math.max(i === 0 ? 6 : 2.5, b.R * view.scale);
+
+    if (i === 0) {                                     // halo du Soleil
+      const g = ctx.createRadialGradient(X, Y, 0, X, Y, rad * 6);
+      g.addColorStop(0, "rgba(255,220,120,.55)");
+      g.addColorStop(1, "rgba(255,200,80,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(X, Y, rad * 6, 0, 6.2832); ctx.fill();
+    }
+
+    ctx.fillStyle = b.color;
+    ctx.beginPath(); ctx.arc(X, Y, rad, 0, 6.2832); ctx.fill();
+
+    if (showVectors && i > 0) {                        // vitesse (vert) / accélération (rouge)
+      arrow(X, Y, b.vx, b.vy, 40, "#5ce38f");
+      arrow(X, Y, b.ax, b.ay, 28, "#ff6b6b");
+    }
+
+    ctx.fillStyle = "rgba(232,235,245,.75)";
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText(b.name, X + rad + 4, Y + 3.5);
+  }
+
+  // Échelle
+  const barPx = 120, barM = barPx / view.scale;
+  ctx.strokeStyle = "rgba(255,255,255,.5)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(20, H - 24); ctx.lineTo(20 + barPx, H - 24); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.6)";
+  ctx.fillText((barM / AU).toFixed(barM / AU < 1 ? 2 : 1) + " UA", 20, H - 30);
+}
+
+function arrow(X, Y, vx, vy, len, color) {
+  const n = Math.hypot(vx, vy) || 1;
+  const ex = X + vx / n * len, ey = Y + vy / n * len;
+  ctx.strokeStyle = color; ctx.lineWidth = 1.3;
+  ctx.beginPath(); ctx.moveTo(X, Y); ctx.lineTo(ex, ey); ctx.stroke();
+}
+
+/* ─────────────────────────── Boucle principale ─────────────────────────── */
+let running = true, showTrails = true, showVectors = false;
+let substeps = 24, dt = 900;
+let frame = 0;
+
+function loop() {
+  if (running) {
+    for (let k = 0; k < substeps; k++) step(dt);
+
+    if (frame % 2 === 0) {
+      for (const b of bodies) {
+        b.trail.push([b.x, b.y]);
+        if (b.trail.length > 1400) b.trail.shift();
+      }
+    }
+  }
+  draw();
+  if (frame % 15 === 0) updateHUD();
+  frame++;
+  requestAnimationFrame(loop);
+}
+
+/* ─────────────────────────── Interface ─────────────────────────── */
+const speedEl = document.getElementById("speed");
+const dtEl    = document.getElementById("dt");
+const zoomEl  = document.getElementById("zoom");
+const tb      = document.getElementById("tb");
+
+function syncLabels() {
+  substeps = +speedEl.value;
+  dt = +dtEl.value;
+  const perFrame = substeps * dt;
+  document.getElementById("speedVal").textContent =
+    perFrame >= DAY ? (perFrame / DAY).toFixed(1) + " j/f" : (perFrame / 3600).toFixed(1) + " h/f";
+  document.getElementById("dtVal").textContent = (dt / 60).toFixed(0) + " min";
+  document.getElementById("zoomVal").textContent = "×" + (view.scale / baseScale).toFixed(2);
+}
+speedEl.oninput = dtEl.oninput = syncLabels;
+zoomEl.oninput = () => { view.scale = baseScale * Math.pow(10, zoomEl.value / 50); syncLabels(); };
+
+document.getElementById("pause").onclick = e => {
+  running = !running;
+  e.target.textContent = running ? "⏸ Pause" : "▶ Play";
+  e.target.classList.toggle("on", !running);
+};
+document.getElementById("reset").onclick = () => { initBodies(); };
+document.getElementById("trails").onclick = e => {
+  showTrails = !showTrails; e.target.classList.toggle("on", showTrails);
+  if (!showTrails) for (const b of bodies) b.trail.length = 0;
+};
+document.getElementById("vectors").onclick = e => {
+  showVectors = !showVectors; e.target.classList.toggle("on", showVectors);
+};
+for (const btn of document.querySelectorAll("[data-view]")) {
+  btn.onclick = e => {
+    document.querySelectorAll("[data-view]").forEach(b => b.classList.remove("on"));
+    e.target.classList.add("on");
+    setView(e.target.dataset.view);
+  };
+}
+
+// Zoom molette centré sur le curseur
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const wx = (e.clientX - W / 2) / view.scale + view.cx;
+  const wy = (e.clientY - H / 2) / view.scale + view.cy;
+  const f = Math.exp(-e.deltaY * 0.0012);
+  view.scale *= f;
+  view.cx = wx - (e.clientX - W / 2) / view.scale;
+  view.cy = wy - (e.clientY - H / 2) / view.scale;
+  view.follow = 0;
+  zoomEl.value = Math.max(-100, Math.min(100, 50 * Math.log10(view.scale / baseScale)));
+  syncLabels();
+}, { passive: false });
+
+// Déplacement à la souris
+let drag = null;
+cv.addEventListener("pointerdown", e => {
+  drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy, moved: false };
+  cv.classList.add("dragging");
+});
+cv.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.hypot(dx, dy) > 3) { drag.moved = true; view.follow = 0; }
+  view.cx = drag.cx - dx / view.scale;
+  view.cy = drag.cy - dy / view.scale;
+});
+cv.addEventListener("pointerup", e => {
+  if (drag && !drag.moved) {                     // clic simple : centrer sur le corps le plus proche
+    let best = -1, bd = 24;
+    bodies.forEach((b, i) => {
+      const d = Math.hypot(toX(b.x) - e.clientX, toY(b.y) - e.clientY);
+      if (d < bd) { bd = d; best = i; }
+    });
+    view.follow = best >= 0 ? best : 0;
+    if (best === 0) { view.cx = 0; view.cy = 0; }
+  }
+  drag = null; cv.classList.remove("dragging");
+});
+window.addEventListener("keydown", e => {
+  if (e.code === "Space") { e.preventDefault(); document.getElementById("pause").click(); }
+});
+
+function updateHUD() {
+  const s = bodies[0];
+  let rows = "";
+  for (let i = 1; i < bodies.length; i++) {
+    const b = bodies[i];
+    const r = Math.hypot(b.x - s.x, b.y - s.y) / AU;
+    const v = Math.hypot(b.vx - s.vx, b.vy - s.vy) / 1000;
+    const T = b.period ? (b.period / YEAR).toFixed(2) : "—";
+    rows += `<tr><td><span class="dot" style="background:${b.color}"></span>${b.name}</td>` +
+            `<td>${r.toFixed(3)}</td><td>${v.toFixed(2)}</td><td>${T}</td></tr>`;
+  }
+  tb.innerHTML = rows;
+
+  const y = simTime / YEAR;
+  document.getElementById("tElapsed").textContent =
+    y >= 1 ? y.toFixed(2) + " ans" : (simTime / DAY).toFixed(1) + " jours";
+  const E = totalEnergy();
+  document.getElementById("energy").textContent = E.toExponential(6) + " J";
+  document.getElementById("drift").textContent = (((E - E0) / Math.abs(E0)) * 100).toExponential(2) + " %";
+}
+
+window.addEventListener("resize", () => { const k = view.scale / baseScale; resize(); baseScale = Math.min(W, H) / 2 / (32 * AU); view.scale = baseScale * k; });
+resize();
+initBodies();
+setView("all");
+syncLabels();
+loop();
+</script>
+</body>
+</html>
